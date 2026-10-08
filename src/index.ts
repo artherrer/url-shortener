@@ -1,18 +1,22 @@
 /**
  * URL Shortener Cloudflare Worker
  *
- * Provee servicio para acortar URLs y gestionar redirecciones.
+ * Provides service to shorten URLs and manage redirections using Cloudflare D1.
  */
 
 export interface ShortenPayload {
 	url: string;
+	expiresAt?: string | null;
 }
 
 export interface ShortenedUrlRecord {
 	code: string;
 	originalUrl: string;
 	shortUrl: string;
+	clicks: number;
 	createdAt: string;
+	expiresAt: string | null;
+	active: boolean;
 }
 
 export interface ServiceResponse<T> {
@@ -21,18 +25,28 @@ export interface ServiceResponse<T> {
 	error?: string;
 }
 
+interface D1UrlRow {
+	id?: number;
+	code: string;
+	original_url: string;
+	clicks: number;
+	created_at: string;
+	expires_at: string | null;
+	active: number;
+}
+
 /**
- * Servicio encargado de la lógica de validación, generación y almacenamiento de URLs acortadas
+ * Service to handle validation, generation, storage, and retrieval of shortened URLs
  */
 export class UrlShortenerService {
 	private static readonly CODE_LENGTH = 6;
 	private static readonly CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
-	// Almacén en memoria como respaldo cuando D1 no está inicializado o en entornos de prueba
+	// In-memory fallback cache when D1 is not available or during lightweight unit tests
 	private static readonly memoryStore = new Map<string, ShortenedUrlRecord>();
 
 	/**
-	 * Genera un código aleatorio criptográficamente seguro
+	 * Generates a cryptographically random short code
 	 */
 	public static generateShortCode(length: number = UrlShortenerService.CODE_LENGTH): string {
 		const bytes = new Uint8Array(length);
@@ -46,44 +60,44 @@ export class UrlShortenerService {
 	}
 
 	/**
-	 * Valida que una URL cumpla con los estándares esperados
+	 * Validates candidate URLs
 	 */
 	public static validateUrl(candidateUrl: unknown): { isValid: boolean; error?: string; normalizedUrl?: string } {
 		if (!candidateUrl || typeof candidateUrl !== "string") {
-			return { isValid: false, error: "La propiedad 'url' es requerida y debe ser un texto." };
+			return { isValid: false, error: "The 'url' property is required and must be a string." };
 		}
 
 		const trimmed = candidateUrl.trim();
 
 		if (trimmed.length === 0) {
-			return { isValid: false, error: "La URL no puede estar vacía." };
+			return { isValid: false, error: "URL cannot be empty." };
 		}
 
 		if (trimmed.length > 2048) {
-			return { isValid: false, error: "La URL excede la longitud máxima permitida (2048 caracteres)." };
+			return { isValid: false, error: "URL exceeds maximum permitted length (2048 characters)." };
 		}
 
 		try {
 			const parsed = new URL(trimmed);
 
 			if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-				return { isValid: false, error: "El protocolo debe ser http:// o https://" };
+				return { isValid: false, error: "Protocol must be http:// or https://" };
 			}
 
 			if (!parsed.hostname || parsed.hostname.length < 3) {
-				return { isValid: false, error: "El nombre de host o dominio no es válido." };
+				return { isValid: false, error: "Hostname or domain name is invalid." };
 			}
 
 			return { isValid: true, normalizedUrl: parsed.toString() };
 		} catch {
-			return { isValid: false, error: "El formato de la URL proporcionada no es válido." };
+			return { isValid: false, error: "Provided URL format is invalid." };
 		}
 	}
 
 	/**
-	 * Inicializa la tabla en D1 si existe la conexión
+	 * Ensures the urls table exists in Cloudflare D1
 	 */
-	private static async initDatabase(db: D1Database): Promise<void> {
+	public static async initDatabase(db: D1Database): Promise<void> {
 		try {
 			await db
 				.prepare(
@@ -91,29 +105,33 @@ export class UrlShortenerService {
 						id INTEGER PRIMARY KEY AUTOINCREMENT,
 						code TEXT NOT NULL UNIQUE,
 						original_url TEXT NOT NULL,
-						created_at TEXT NOT NULL
+						clicks INTEGER NOT NULL DEFAULT 0,
+						created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+						expires_at TIMESTAMP,
+						active BOOLEAN NOT NULL DEFAULT 1
 					);`,
 				)
 				.run();
 		} catch {
-			// En caso de que el entorno o permisos no lo permitan, continuar sin bloquear
+			// Ignore if already initialized or restricted
 		}
 	}
 
 	/**
-	 * Procesa la creación de una URL corta
+	 * Creates a shortened URL and persists it in Cloudflare D1
 	 */
 	public static async createShortUrl(
 		rawUrl: string,
 		baseUrl: string,
 		env?: Env,
+		expiresAt?: string | null,
 	): Promise<ServiceResponse<ShortenedUrlRecord>> {
 		const validation = UrlShortenerService.validateUrl(rawUrl);
 
 		if (!validation.isValid || !validation.normalizedUrl) {
 			return {
 				success: false,
-				error: validation.error || "URL inválida",
+				error: validation.error || "Invalid URL",
 			};
 		}
 
@@ -121,28 +139,43 @@ export class UrlShortenerService {
 		const cleanBase = baseUrl.replace(/\/+$/, "");
 		const shortUrl = `${cleanBase}/${code}`;
 		const now = new Date().toISOString();
+		const validExpiresAt = expiresAt ? new Date(expiresAt).toISOString() : null;
 
 		const record: ShortenedUrlRecord = {
 			code,
 			originalUrl: validation.normalizedUrl,
 			shortUrl,
+			clicks: 0,
 			createdAt: now,
+			expiresAt: validExpiresAt,
+			active: true,
 		};
 
-		// Guardar en D1 si está configurado
+		// Persist to Cloudflare D1 database
 		if (env?.url_shortener_db) {
 			try {
 				await UrlShortenerService.initDatabase(env.url_shortener_db);
+
 				await env.url_shortener_db
-					.prepare("INSERT INTO urls (code, original_url, created_at) VALUES (?, ?, ?)")
-					.bind(code, record.originalUrl, now)
+					.prepare(
+						`INSERT INTO urls (code, original_url, clicks, created_at, expires_at, active)
+						 VALUES (?, ?, ?, ?, ?, ?)`
+					)
+					.bind(
+						record.code,
+						record.originalUrl,
+						record.clicks,
+						record.createdAt,
+						record.expiresAt,
+						record.active ? 1 : 0
+					)
 					.run();
 			} catch (dbError) {
-				console.warn("No se pudo persistir en D1, usando almacenamiento auxiliar:", dbError);
+				console.warn("Could not persist to D1, using fallback memory store:", dbError);
 			}
 		}
 
-		// Respaldar en el store en memoria
+		// Also cache in memory for fallback / fast lookup
 		UrlShortenerService.memoryStore.set(code, record);
 
 		return {
@@ -152,30 +185,57 @@ export class UrlShortenerService {
 	}
 
 	/**
-	 * Obtiene la URL original dado un código
+	 * Retrieves the original URL by code from D1, checking expiry and active status, and increments clicks
 	 */
 	public static async getOriginalUrl(code: string, env?: Env): Promise<string | null> {
 		if (env?.url_shortener_db) {
 			try {
-				const result = await env.url_shortener_db
-					.prepare("SELECT original_url FROM urls WHERE code = ? LIMIT 1")
+				const row = await env.url_shortener_db
+					.prepare("SELECT code, original_url, clicks, created_at, expires_at, active FROM urls WHERE code = ? LIMIT 1")
 					.bind(code)
-					.first<{ original_url: string }>();
+					.first<D1UrlRow>();
 
-				if (result?.original_url) {
-					return result.original_url;
+				if (row) {
+					// Check if active
+					if (row.active === 0) {
+						return null;
+					}
+
+					// Check if expired
+					if (row.expires_at && new Date(row.expires_at) < new Date()) {
+						return null;
+					}
+
+					// Increment clicks asynchronously
+					try {
+						await env.url_shortener_db
+							.prepare("UPDATE urls SET clicks = clicks + 1 WHERE code = ?")
+							.bind(code)
+							.run();
+					} catch (updateErr) {
+						console.error("Failed to increment clicks in D1:", updateErr);
+					}
+
+					return row.original_url;
 				}
 			} catch {
-				// Fallback al almacén en memoria
+				// Fallback to memory store if query failed
 			}
 		}
 
 		const inMemory = UrlShortenerService.memoryStore.get(code);
-		return inMemory ? inMemory.originalUrl : null;
+		if (inMemory) {
+			if (!inMemory.active) return null;
+			if (inMemory.expiresAt && new Date(inMemory.expiresAt) < new Date()) return null;
+			inMemory.clicks += 1;
+			return inMemory.originalUrl;
+		}
+
+		return null;
 	}
 
 	/**
-	 * Maneja la petición POST de acortamiento proveniente del formulario
+	 * Handles the POST request to shorten a URL
 	 */
 	public static async handlePostShorten(request: Request, env: Env): Promise<Response> {
 		const corsHeaders = UrlShortenerService.getCorsHeaders(request);
@@ -187,7 +247,7 @@ export class UrlShortenerService {
 			return new Response(
 				JSON.stringify({
 					success: false,
-					error: "Cuerpo de solicitud JSON inválido o malformado.",
+					error: "Invalid or malformed JSON request body.",
 				}),
 				{
 					status: 400,
@@ -203,7 +263,7 @@ export class UrlShortenerService {
 			return new Response(
 				JSON.stringify({
 					success: false,
-					error: "Se requiere el campo 'url' en el cuerpo JSON.",
+					error: "Missing required 'url' field in JSON request body.",
 				}),
 				{
 					status: 400,
@@ -215,11 +275,16 @@ export class UrlShortenerService {
 			);
 		}
 
-		const rawUrl = (body as ShortenPayload).url;
+		const payload = body as ShortenPayload;
 		const requestUrl = new URL(request.url);
 		const baseUrl = `${requestUrl.protocol}//${requestUrl.host}`;
 
-		const result = await UrlShortenerService.createShortUrl(rawUrl, baseUrl, env);
+		const result = await UrlShortenerService.createShortUrl(
+			payload.url,
+			baseUrl,
+			env,
+			payload.expiresAt,
+		);
 
 		if (!result.success) {
 			return new Response(JSON.stringify(result), {
@@ -241,7 +306,7 @@ export class UrlShortenerService {
 	}
 
 	/**
-	 * Headers para soporte CORS
+	 * CORS headers support
 	 */
 	public static getCorsHeaders(request: Request): Record<string, string> {
 		const origin = request.headers.get("Origin") || "*";
@@ -259,7 +324,7 @@ export default {
 		const url = new URL(request.url);
 		const corsHeaders = UrlShortenerService.getCorsHeaders(request);
 
-		// Manejo de preflight CORS (OPTIONS)
+		// Handle CORS preflight (OPTIONS)
 		if (request.method === "OPTIONS") {
 			return new Response(null, {
 				status: 204,
@@ -267,12 +332,12 @@ export default {
 			});
 		}
 
-		// Ruta del servicio para procesar el formulario (POST /api/shorten)
+		// Route for shortening URLs (POST /api/shorten or POST /api/urls)
 		if (request.method === "POST" && (url.pathname === "/api/shorten" || url.pathname === "/api/urls")) {
 			return UrlShortenerService.handlePostShorten(request, env);
 		}
 
-		// Redirección si se solicita un código acortado (GET /:code)
+		// Route for redirecting short codes (GET /:code)
 		const potentialCode = url.pathname.replace(/^\/+/, "");
 		if (request.method === "GET" && potentialCode && !potentialCode.startsWith("api/")) {
 			const originalUrl = await UrlShortenerService.getOriginalUrl(potentialCode, env);
@@ -281,7 +346,7 @@ export default {
 			}
 		}
 
-		// Mantener compatibilidad con endpoint por defecto
+		// Default fallback
 		return new Response("Hello World!");
 	},
 } satisfies ExportedHandler<Env>;

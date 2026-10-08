@@ -10,6 +10,7 @@
 			"binding": "url_shortener_db",
 			"database_name": "url-shortener-db",
 			"database_id": "e72f028d-5109-423e-a34d-cf85f0197555",
+			"migrations_dir": "migrations",
 			"remote": true
 		}
 	],
