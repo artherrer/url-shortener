@@ -8,6 +8,8 @@
 export interface ShortenPayload {
 	url: string;
 	expiresIn?: number; // In milliseconds, default 86400000 (24h)
+	alias?: string; // Optional custom code / alias
+	customAlias?: string; // Alternative key for custom alias
 }
 
 export interface ShortenedUrlRecord {
@@ -57,6 +59,7 @@ export interface ServiceResponse<T> {
 	success: boolean;
 	data?: T;
 	error?: string;
+	statusCode?: number;
 }
 
 interface D1UrlRow {
@@ -143,6 +146,72 @@ export class UrlShortenerService {
 	}
 
 	/**
+	 * Validates optional custom alias format and length
+	 */
+	public static validateAlias(alias: unknown): { isValid: boolean; error?: string; cleanAlias?: string } {
+		if (alias === undefined || alias === null || alias === "") {
+			return { isValid: true };
+		}
+
+		if (typeof alias !== "string") {
+			return { isValid: false, error: "Alias must be a string." };
+		}
+
+		const clean = alias.trim();
+		if (clean.length === 0) {
+			return { isValid: true };
+		}
+
+		if (clean.length < 3) {
+			return { isValid: false, error: "Custom alias must be at least 3 characters long." };
+		}
+
+		if (clean.length > 50) {
+			return { isValid: false, error: "Custom alias cannot exceed 50 characters." };
+		}
+
+		if (!/^[a-zA-Z0-9_-]+$/.test(clean)) {
+			return {
+				isValid: false,
+				error: "Custom alias can only contain letters, numbers, hyphens, and underscores.",
+			};
+		}
+
+		const reserved = ["api", "links", "shorten", "urls", "validate", "analytics", "favicon.ico", "robots.txt"];
+		if (reserved.includes(clean.toLowerCase())) {
+			return { isValid: false, error: `The alias '${clean}' is reserved and cannot be used.` };
+		}
+
+		return { isValid: true, cleanAlias: clean };
+	}
+
+	/**
+	 * Checks whether a short code or alias already exists in D1 or memoryStore
+	 */
+	public static async codeExists(code: string, env?: Env): Promise<boolean> {
+		if (UrlShortenerService.memoryStore.has(code)) {
+			return true;
+		}
+
+		if (env?.url_shortener_db) {
+			try {
+				await UrlShortenerService.initDatabase(env.url_shortener_db);
+				const row = await env.url_shortener_db
+					.prepare("SELECT code FROM urls WHERE code = ? LIMIT 1")
+					.bind(code)
+					.first<{ code: string }>();
+				if (row && row.code) {
+					return true;
+				}
+			} catch {
+				// Fall through if table error
+			}
+		}
+
+		return false;
+	}
+
+	/**
 	 * Ensures both the urls and url_analytics tables exist in Cloudflare D1
 	 */
 	public static async initDatabase(db: D1Database): Promise<void> {
@@ -200,6 +269,7 @@ export class UrlShortenerService {
 		baseUrl: string,
 		env?: Env,
 		expiresInMs: number = UrlShortenerService.DEFAULT_EXPIRES_IN_MS,
+		customAlias?: string,
 	): Promise<ServiceResponse<ShortenedUrlRecord>> {
 		const validation = UrlShortenerService.validateUrl(rawUrl);
 
@@ -207,7 +277,34 @@ export class UrlShortenerService {
 			return {
 				success: false,
 				error: validation.error || "Invalid URL",
+				statusCode: 400,
 			};
+		}
+
+		let code: string;
+
+		if (customAlias && typeof customAlias === "string" && customAlias.trim().length > 0) {
+			const aliasValidation = UrlShortenerService.validateAlias(customAlias);
+			if (!aliasValidation.isValid || !aliasValidation.cleanAlias) {
+				return {
+					success: false,
+					error: aliasValidation.error || "Invalid alias format.",
+					statusCode: 400,
+				};
+			}
+
+			const candidate = aliasValidation.cleanAlias;
+			const exists = await UrlShortenerService.codeExists(candidate, env);
+			if (exists) {
+				return {
+					success: false,
+					error: `The alias '${candidate}' is already in use. Please choose another one.`,
+					statusCode: 409,
+				};
+			}
+			code = candidate;
+		} else {
+			code = UrlShortenerService.generateShortCode();
 		}
 
 		// Ensure expiresInMs is a positive integer
@@ -215,7 +312,6 @@ export class UrlShortenerService {
 			? expiresInMs
 			: UrlShortenerService.DEFAULT_EXPIRES_IN_MS;
 
-		const code = UrlShortenerService.generateShortCode();
 		const cleanBase = baseUrl.replace(/\/+$/, "");
 		const shortUrl = `${cleanBase}/${code}`;
 		const now = new Date();
@@ -562,16 +658,19 @@ export class UrlShortenerService {
 			? payload.expiresIn
 			: UrlShortenerService.DEFAULT_EXPIRES_IN_MS;
 
+		const requestedAlias = payload.alias || payload.customAlias;
+
 		const result = await UrlShortenerService.createShortUrl(
 			payload.url,
 			baseUrl,
 			env,
 			expiresIn,
+			requestedAlias,
 		);
 
 		if (!result.success || !result.data) {
 			return new Response(JSON.stringify(result), {
-				status: 400,
+				status: result.statusCode || 400,
 				headers: {
 					"Content-Type": "application/json",
 					...corsHeaders,
@@ -712,9 +811,46 @@ export class UrlShortenerService {
 	}
 
 	/**
+	 * Determines the frontend root URL based on request headers, environment, or default local port
+	 */
+	public static getFrontendUrl(request?: Request, env?: Env): string {
+		const envRecord = env as unknown as Record<string, unknown> | undefined;
+		if (envRecord?.FRONTEND_URL && typeof envRecord.FRONTEND_URL === "string") {
+			return envRecord.FRONTEND_URL;
+		}
+
+		if (request) {
+			const origin = request.headers.get("Origin");
+			if (origin && origin !== "null") return origin;
+
+			const referer = request.headers.get("Referer");
+			if (referer) {
+				try {
+					const parsed = new URL(referer);
+					if (parsed.origin) return parsed.origin;
+				} catch {
+					// Ignore invalid referer
+				}
+			}
+
+			const host = request.headers.get("Host") || "";
+			if (host.includes("localhost:8787") || host.includes("127.0.0.1:8787")) {
+				return "http://localhost:5173";
+			}
+		}
+
+		return "http://localhost:5173";
+	}
+
+	/**
 	 * Renders a user-friendly HTML error page for redirection failures
 	 */
-	public static renderErrorPage(status: number, title: string, description: string): string {
+	public static renderErrorPage(
+		status: number,
+		title: string,
+		description: string,
+		frontendUrl: string = "http://localhost:5173",
+	): string {
 		return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -784,7 +920,7 @@ export class UrlShortenerService {
     <div class="badge">HTTP ${status}</div>
     <h1>${title}</h1>
     <p>${description}</p>
-    <a href="/" class="btn">Go to URL Shortener</a>
+    <a href="${frontendUrl}" class="btn">Go to URL Shortener</a>
   </div>
 </body>
 </html>`;
@@ -870,11 +1006,14 @@ export default {
 				);
 			}
 
+			const frontendUrl = UrlShortenerService.getFrontendUrl(request, env);
+
 			return new Response(
 				UrlShortenerService.renderErrorPage(
 					redirectResult.status,
 					redirectResult.error,
 					redirectResult.description,
+					frontendUrl,
 				),
 				{
 					status: redirectResult.status,

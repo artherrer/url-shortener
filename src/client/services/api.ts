@@ -12,23 +12,29 @@ import {
  */
 export const urlApiClient = {
 	/**
-	 * Sends a URL to be shortened with optional expiresIn (default 86400000 ms)
+	 * Sends a URL to be shortened with optional expiresIn (default 86400000 ms) and optional custom alias
 	 * Returns code and full shortUrl
 	 */
 	async shortenUrl(
 		originalUrl: string,
 		expiresIn: number = 86400000,
+		alias?: string,
 	): Promise<{ code: string; shortUrl: string; data?: ShortenUrlResponseData }> {
+		const payload: { url: string; expiresIn: number; alias?: string } = {
+			url: originalUrl.trim(),
+			expiresIn,
+		};
+		if (alias && alias.trim()) {
+			payload.alias = alias.trim();
+		}
+
 		const response = await fetch("/api/shorten", {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
 				Accept: "application/json",
 			},
-			body: JSON.stringify({
-				url: originalUrl.trim(),
-				expiresIn,
-			}),
+			body: JSON.stringify(payload),
 		});
 
 		let result: ShortenPostResponse;

@@ -1,6 +1,7 @@
 export interface ShortenUrlRequest {
 	url: string;
 	expiresIn?: number; // In milliseconds, default 86400000 (24h)
+	alias?: string; // Optional custom short code
 }
 
 export interface ShortenUrlResponseData {

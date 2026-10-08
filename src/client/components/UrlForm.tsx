@@ -17,10 +17,13 @@ const EXPIRATION_PRESETS = [
 
 export function UrlForm({ onUrlCreated }: UrlFormProps) {
 	const [url, setUrl] = useState<string>("");
+	const [alias, setAlias] = useState<string>("");
 	const [selectedPreset, setSelectedPreset] = useState<number>(86400000);
 	const [customExpiresIn, setCustomExpiresIn] = useState<string>("86400000");
 	const [validationError, setValidationError] = useState<string | null>(null);
+	const [aliasError, setAliasError] = useState<string | null>(null);
 	const [isTouched, setIsTouched] = useState<boolean>(false);
+	const [isAliasTouched, setIsAliasTouched] = useState<boolean>(false);
 	const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 	const [apiError, setApiError] = useState<string | null>(null);
 	const [lastSuccess, setLastSuccess] = useState<{
@@ -39,6 +42,28 @@ export function UrlForm({ onUrlCreated }: UrlFormProps) {
 			return !isNaN(parsed) && parsed > 0 ? parsed : 86400000;
 		}
 		return selectedPreset;
+	};
+
+	/**
+	 * Validates optional custom alias format
+	 */
+	const validateAlias = (value: string): string | null => {
+		const trimmed = value.trim();
+		if (!trimmed) return null; // Alias is optional
+
+		if (trimmed.length < 3) {
+			return "Custom alias must be at least 3 characters long.";
+		}
+
+		if (trimmed.length > 50) {
+			return "Custom alias cannot exceed 50 characters.";
+		}
+
+		if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+			return "Custom alias can only contain letters, numbers, hyphens, and underscores.";
+		}
+
+		return null;
 	};
 
 	/**
@@ -99,17 +124,37 @@ export function UrlForm({ onUrlCreated }: UrlFormProps) {
 		setValidationError(validateUrl(url));
 	};
 
+	const handleAliasChange = (e: ChangeEvent<HTMLInputElement>) => {
+		const nextValue = e.target.value;
+		setAlias(nextValue);
+		setApiError(null);
+
+		if (isAliasTouched) {
+			setAliasError(validateAlias(nextValue));
+		}
+	};
+
+	const handleAliasBlur = () => {
+		setIsAliasTouched(true);
+		setAliasError(validateAlias(alias));
+	};
+
 	const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
 		e.preventDefault();
 		setIsTouched(true);
+		setIsAliasTouched(true);
 
-		const error = validateUrl(url);
-		if (error) {
-			setValidationError(error);
+		const urlErr = validateUrl(url);
+		const alErr = validateAlias(alias);
+
+		if (urlErr || alErr) {
+			setValidationError(urlErr);
+			setAliasError(alErr);
 			return;
 		}
 
 		setValidationError(null);
+		setAliasError(null);
 		setApiError(null);
 		setIsSubmitting(true);
 		setCopied(false);
@@ -117,10 +162,12 @@ export function UrlForm({ onUrlCreated }: UrlFormProps) {
 		const expiresInMs = getEffectiveExpiresIn();
 
 		try {
-			const result = await urlApiClient.shortenUrl(url, expiresInMs);
+			const result = await urlApiClient.shortenUrl(url, expiresInMs, alias.trim() || undefined);
 			setLastSuccess(result);
 			setUrl("");
+			setAlias("");
 			setIsTouched(false);
+			setIsAliasTouched(false);
 			if (onUrlCreated) {
 				onUrlCreated(result);
 			}
@@ -245,6 +292,93 @@ export function UrlForm({ onUrlCreated }: UrlFormProps) {
 					)}
 				</div>
 
+				{/* Custom Alias Input (Optional) */}
+				<div className="mb-5">
+					<div className="flex items-center justify-between mb-2">
+						<label
+							htmlFor="alias-input"
+							className="block text-sm font-semibold text-slate-800 dark:text-slate-200"
+						>
+							Custom Alias
+						</label>
+						<span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 font-medium">
+							Optional
+						</span>
+					</div>
+					<div className="relative">
+						<div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400 dark:text-slate-500 font-mono text-sm">
+							<span>/</span>
+						</div>
+
+						<input
+							id="alias-input"
+							type="text"
+							value={alias}
+							onChange={handleAliasChange}
+							onBlur={handleAliasBlur}
+							placeholder="custom-link-name (e.g. promo2026)"
+							disabled={isSubmitting}
+							aria-invalid={!!aliasError}
+							aria-describedby={aliasError ? "alias-error" : undefined}
+							className={`w-full pl-8 pr-10 py-3 rounded-xl border text-slate-900 dark:text-white bg-slate-50 dark:bg-slate-800/60 placeholder-slate-400 dark:placeholder-slate-500 text-sm font-mono focus:outline-none focus:ring-2 transition duration-200 ${
+								aliasError
+									? "border-red-500 focus:border-red-500 focus:ring-red-500/20"
+									: isAliasTouched && alias && !aliasError
+									? "border-emerald-500 focus:border-emerald-500 focus:ring-emerald-500/20"
+									: "border-slate-300 dark:border-slate-700 focus:border-indigo-500 focus:ring-indigo-500/20"
+							} disabled:opacity-50 disabled:cursor-not-allowed`}
+						/>
+
+						{alias && !isSubmitting && (
+							<button
+								type="button"
+								onClick={() => {
+									setAlias("");
+									setAliasError(null);
+									setIsAliasTouched(false);
+								}}
+								className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+								title="Clear alias"
+							>
+								<svg
+									className="w-4 h-4"
+									fill="none"
+									stroke="currentColor"
+									viewBox="0 0 24 24"
+								>
+									<path
+										strokeLinecap="round"
+										strokeLinejoin="round"
+										strokeWidth="2"
+										d="M6 18L18 6M6 6l12 12"
+									/>
+								</svg>
+							</button>
+						)}
+					</div>
+
+					{/* Alias Validation Error */}
+					{aliasError && (
+						<p
+							id="alias-error"
+							className="mt-2 text-xs sm:text-sm text-red-600 dark:text-red-400 flex items-center gap-1.5"
+						>
+							<svg
+								className="w-4 h-4 shrink-0"
+								fill="currentColor"
+								viewBox="0 0 20 20"
+							>
+								<path
+									fillRule="evenodd"
+									d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
+									clipRule="evenodd"
+								/>
+							</svg>
+							<span>{aliasError}</span>
+						</p>
+					)}
+				</div>
+
 				{/* Expiration Configuration Field (expiresIn) */}
 				<div className="mb-6">
 					<div className="flex items-center justify-between mb-2">
@@ -327,7 +461,7 @@ export function UrlForm({ onUrlCreated }: UrlFormProps) {
 				{/* Submit Button */}
 				<button
 					type="submit"
-					disabled={isSubmitting || (isTouched && !!validationError) || !url.trim()}
+					disabled={isSubmitting || (isTouched && !!validationError) || (isAliasTouched && !!aliasError) || !url.trim()}
 					className="w-full py-3.5 px-6 rounded-xl font-medium text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-indigo-500/50 shadow-md shadow-indigo-500/25 transition duration-200 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:from-indigo-600 disabled:hover:to-violet-600 disabled:active:scale-100"
 				>
 					{isSubmitting ? (
