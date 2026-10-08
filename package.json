@@ -1,8 +1,12 @@
 {
 	"name": "url-shortener",
 	"version": "0.0.0",
+	"type": "module",
 	"private": true,
 	"scripts": {
+		"client:dev": "vite",
+		"client:build": "vite build",
+		"client:preview": "vite preview",
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
@@ -11,8 +15,18 @@
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-plugin": "^1.0.0",
+		"@tailwindcss/vite": "^4.3.3",
+		"@types/react": "^19.3.0",
+		"@types/react-dom": "^19.3.0",
+		"@vitejs/plugin-react": "^6.1.2",
+		"tailwindcss": "^4.3.3",
 		"typescript": "^5.5.2",
+		"vite": "^8.3.4",
 		"vitest": "~4.1.0",
 		"wrangler": "^4"
+	},
+	"dependencies": {
+		"react": "^19.3.0",
+		"react-dom": "^19.3.0"
 	}
 }
