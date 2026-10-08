@@ -413,6 +413,9 @@ describe("URL Shortener Worker", () => {
 			const html = await directRes.text();
 			expect(html).toContain("410");
 			expect(html).toContain("Link Expired");
+			// Verify fix: button redirects to frontend root, not api root '/'
+			expect(html).toContain('href="http://localhost:5173"');
+			expect(html).not.toContain('href="/"');
 		});
 
 		it("GET /:code returns 404 HTML page when code is not found in browser", async () => {
@@ -427,6 +430,169 @@ describe("URL Shortener Worker", () => {
 			const html = await res.text();
 			expect(html).toContain("404");
 			expect(html).toContain("Not Found");
+			expect(html).toContain('href="http://localhost:5173"');
+		});
+	});
+
+	describe("Custom Aliases Feature", () => {
+		it("POST /api/shorten: successfully creates short URL with a valid custom alias", async () => {
+			const targetUrl = "https://example.com/special-summer-sale";
+			const customAlias = "summer-sale-2026";
+			const ctx = createExecutionContext();
+
+			const req = new IncomingRequest("http://localhost:8787/api/shorten", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					url: targetUrl,
+					alias: customAlias,
+				}),
+			});
+
+			const res = await worker.fetch(req, env, ctx);
+			await waitOnExecutionContext(ctx);
+
+			expect(res.status).toBe(201);
+			const json = (await res.json()) as {
+				success: boolean;
+				code: string;
+				shortUrl: string;
+			};
+
+			expect(json.success).toBe(true);
+			expect(json.code).toBe(customAlias);
+			expect(json.shortUrl).toBe(`http://localhost:8787/${customAlias}`);
+
+			// Verify redirection works with custom alias
+			const visitReq = new IncomingRequest(`http://localhost:8787/${customAlias}`);
+			const visitRes = await worker.fetch(visitReq, env, ctx);
+			await waitOnExecutionContext(ctx);
+
+			expect(visitRes.status).toBe(302);
+			expect(visitRes.headers.get("Location")).toBe(targetUrl);
+		});
+
+		it("POST /api/shorten: returns 409 conflict when custom alias already exists", async () => {
+			const targetUrl = "https://example.com/first-claim";
+			const duplicateAlias = "exclusive-deal";
+			const ctx = createExecutionContext();
+
+			// First insertion
+			const firstReq = new IncomingRequest("http://localhost:8787/api/shorten", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					url: targetUrl,
+					alias: duplicateAlias,
+				}),
+			});
+			const firstRes = await worker.fetch(firstReq, env, ctx);
+			await waitOnExecutionContext(ctx);
+			expect(firstRes.status).toBe(201);
+
+			// Second insertion with identical alias
+			const dupReq = new IncomingRequest("http://localhost:8787/api/shorten", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					url: "https://example.com/second-attempt",
+					alias: duplicateAlias,
+				}),
+			});
+			const dupRes = await worker.fetch(dupReq, env, ctx);
+			await waitOnExecutionContext(ctx);
+
+			expect(dupRes.status).toBe(409);
+			const dupJson = (await dupRes.json()) as { success: boolean; error: string };
+			expect(dupJson.success).toBe(false);
+			expect(dupJson.error).toContain(duplicateAlias);
+			expect(dupJson.error).toContain("already in use");
+		});
+
+		it("POST /api/shorten: rejects invalid alias formats (length, special characters)", async () => {
+			const ctx = createExecutionContext();
+
+			const invalidAliases = [
+				{ alias: "ab", reason: "too short" },
+				{ alias: "a".repeat(55), reason: "too long" },
+				{ alias: "my alias with spaces", reason: "spaces" },
+				{ alias: "hello@world!", reason: "special characters" },
+				{ alias: "link/with/slashes", reason: "slashes" },
+			];
+
+			for (const item of invalidAliases) {
+				const req = new IncomingRequest("http://localhost:8787/api/shorten", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						url: "https://example.com/test-invalid-alias",
+						alias: item.alias,
+					}),
+				});
+				const res = await worker.fetch(req, env, ctx);
+				await waitOnExecutionContext(ctx);
+
+				expect(res.status).toBe(400);
+				const json = (await res.json()) as { success: boolean; error: string };
+				expect(json.success).toBe(false);
+				expect(json.error).toBeDefined();
+			}
+		});
+
+		it("POST /api/shorten: rejects reserved alias names", async () => {
+			const ctx = createExecutionContext();
+			const reservedNames = ["api", "links", "shorten", "validate", "analytics"];
+
+			for (const reserved of reservedNames) {
+				const req = new IncomingRequest("http://localhost:8787/api/shorten", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						url: "https://example.com/test-reserved",
+						alias: reserved,
+					}),
+				});
+				const res = await worker.fetch(req, env, ctx);
+				await waitOnExecutionContext(ctx);
+
+				expect(res.status).toBe(400);
+				const json = (await res.json()) as { success: boolean; error: string };
+				expect(json.success).toBe(false);
+				expect(json.error).toContain("reserved");
+			}
+		});
+
+		it("POST /api/shorten: alias is optional, generates random code when omitted or empty", async () => {
+			const ctx = createExecutionContext();
+
+			// Omitted alias
+			const req1 = new IncomingRequest("http://localhost:8787/api/shorten", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					url: "https://example.com/random-code-1",
+				}),
+			});
+			const res1 = await worker.fetch(req1, env, ctx);
+			await waitOnExecutionContext(ctx);
+			const json1 = (await res1.json()) as { code: string };
+			expect(res1.status).toBe(201);
+			expect(json1.code.length).toBe(6);
+
+			// Empty string alias
+			const req2 = new IncomingRequest("http://localhost:8787/api/shorten", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					url: "https://example.com/random-code-2",
+					alias: "   ",
+				}),
+			});
+			const res2 = await worker.fetch(req2, env, ctx);
+			await waitOnExecutionContext(ctx);
+			const json2 = (await res2.json()) as { code: string };
+			expect(res2.status).toBe(201);
+			expect(json2.code.length).toBe(6);
 		});
 	});
 });
