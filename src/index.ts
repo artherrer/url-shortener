@@ -656,6 +656,7 @@ export class UrlShortenerService {
 				code,
 				status: result.status,
 				valid: false,
+				reason: result.status === 410 ? result.reason : undefined,
 				title: result.error,
 				description: result.description,
 			}),

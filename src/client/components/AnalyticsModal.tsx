@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { urlApiClient } from "../services/api";
+import { QrCodeDisplay } from "./QrCodeDisplay";
 import { UrlAnalyticsData } from "../types";
 
 export interface AnalyticsModalProps {
@@ -218,6 +219,21 @@ export function AnalyticsModal({ code, onClose }: AnalyticsModalProps) {
 									<span className="font-mono text-slate-600 dark:text-slate-300 truncate max-w-xs">
 										{data.originalUrl}
 									</span>
+								</div>
+							</div>
+
+							{/* QR Code Container */}
+							<div className="flex flex-col sm:flex-row items-center gap-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800">
+								<div className="shrink-0">
+									<QrCodeDisplay url={data.shortUrl} code={data.code} size={110} />
+								</div>
+								<div className="text-xs text-slate-500 dark:text-slate-400 space-y-1 text-center sm:text-left">
+									<p className="font-semibold text-slate-800 dark:text-slate-200">
+										Scan or Share QR Code
+									</p>
+									<p>
+										Scan this code to test real-time redirection and increment the click count above.
+									</p>
 								</div>
 							</div>
 

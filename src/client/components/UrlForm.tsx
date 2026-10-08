@@ -1,5 +1,6 @@
 import React, { useState, ChangeEvent, FormEvent } from "react";
 import { urlApiClient } from "../services/api";
+import { QrCodeDisplay } from "./QrCodeDisplay";
 import { ShortenUrlResponseData } from "../types";
 
 export interface UrlFormProps {
@@ -491,6 +492,25 @@ export function UrlForm({ onUrlCreated }: UrlFormProps) {
 							Destination: <span className="font-mono">{lastSuccess.data.originalUrl}</span>
 						</p>
 					)}
+
+					{/* QR Code Section */}
+					<div className="mt-5 pt-4 border-t border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row items-center gap-4">
+						<div className="w-full sm:w-auto shrink-0 flex justify-center">
+							<QrCodeDisplay
+								url={lastSuccess.shortUrl}
+								code={lastSuccess.code}
+								size={140}
+							/>
+						</div>
+						<div className="text-xs text-slate-500 dark:text-slate-400 space-y-1 text-center sm:text-left">
+							<p className="font-semibold text-slate-800 dark:text-slate-200">
+								QR Code Ready
+							</p>
+							<p>
+								Anyone can scan this QR code with a smartphone camera to immediately visit your short link.
+							</p>
+						</div>
+					</div>
 				</div>
 			)}
 		</div>
